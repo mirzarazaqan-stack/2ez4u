@@ -4,6 +4,8 @@ import tkinter as tk
 
 from backend.m1_pesanan import Pesanan, Array, LinkList, muat_pesanan, format_waktu
 from backend.m2_antrean import PengelolaAntrean, proses_struk
+from backend.m3_laporan import (Pencacah, BATAS_INSERTION, ambil_awal, insertion_sort,
+                                merge_sort, linear_search, binary_search)
 
 FOLDER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JALUR_CSV = os.path.join(FOLDER, "data", "pesanan.csv")
@@ -50,6 +52,19 @@ MENU = [
      (("Berapa kali dequeue", "1"),)),
     ("queue_circular", "QUEUE - DEQUEUE CIRCULAR", "Queue circular: ambil depan, front maju",
      "Hanya front yang maju, tidak ada yang digeser. O(1).", (("Berapa kali dequeue", "1"),)),
+
+    ("", "M3 - SORT DAN SEARCH", "", "", ()),
+    ("sort_insertion", "SORT - INSERTION SORT", "Insertion sort: urutkan n baris pertama",
+     "Stabil, O(n^2). Dibatasi 20.000 baris. Melaporkan perbandingan dan pemindahan.",
+     (("Jumlah baris", "10"), ("Kunci", ("harga", "oid", "selesai")))),
+    ("sort_merge", "SORT - MERGE SORT", "Merge sort: urutkan n baris pertama",
+     "Stabil, O(n log n). Sanggup mengurutkan seluruh data.",
+     (("Jumlah baris", "4000"), ("Kunci", ("oid", "harga", "selesai")))),
+    ("search_linear", "SEARCH - LINEAR SEARCH", "Linear search: cari oid",
+     "Telusur satu per satu, data tidak perlu terurut. O(n).", (("oid yang dicari", "O-137442"),)),
+    ("search_binary", "SEARCH - BINARY SEARCH", "Binary search: cari oid",
+     "Butuh daftar terurut oid (dibangun sekali dengan merge sort). O(log n).",
+     (("oid yang dicari", "O-137442"),)),
 ]
 
 
@@ -72,6 +87,7 @@ class Aplikasi:
         self.array_m1 = None
         self.link_m1 = None
         self.pengelola = None
+        self.urut_oid = None  # daftar terurut oid untuk binary search
         self.nomor_baru = 0
         self.menu_aktif = None
         self.entri = []
@@ -154,11 +170,16 @@ class Aplikasi:
         self.entri = []
         for nama, awal in m[4]:
             tk.Label(self.frame_form, text=nama, anchor="w", font=("Helvetica", 9, "bold")).pack(fill="x")
-            kotak = tk.Entry(self.frame_form, width=60)
-            kotak.insert(0, awal)
-            kotak.pack(anchor="w", pady=(0, 4))
-            kotak.bind("<Return>", self.jalankan_menu)
-            self.entri.append(kotak)
+            if isinstance(awal, tuple):  # pilihan
+                pilihan = tk.StringVar(value=awal[0])
+                tk.OptionMenu(self.frame_form, pilihan, *awal).pack(anchor="w", pady=(0, 4))
+                self.entri.append(pilihan)
+            else:
+                kotak = tk.Entry(self.frame_form, width=60)
+                kotak.insert(0, awal)
+                kotak.pack(anchor="w", pady=(0, 4))
+                kotak.bind("<Return>", self.jalankan_menu)
+                self.entri.append(kotak)
 
     def jalankan_menu(self, event=None):
         if self.menu_aktif is None:
@@ -169,11 +190,7 @@ class Aplikasi:
             teks, modul = self.kerjakan(kode)
         except (ValueError, IndexError) as e:
             teks, modul = "GALAT: " + str(e), "error"
-        ms = (time.perf_counter() - mulai) * 1000
-        if ms >= 1000:
-            waktu = f"{ms / 1000:.2f} s"
-        else:
-            waktu = f"{ms:.2f} ms"
+        waktu = self.waktu_teks((time.perf_counter() - mulai) * 1000)
 
         self.hasil.config(state="normal")
         self.hasil.delete("1.0", "end")
@@ -183,6 +200,11 @@ class Aplikasi:
         self.log.insert("1.0", f"{kode:<18}-> {modul:<22}{waktu}\n")  # terbaru di atas
         self.log.config(state="disabled")
         self.status.config(text=f"[{modul}] {waktu}")
+
+    def waktu_teks(self, ms):
+        if ms >= 1000:
+            return f"{ms / 1000:.2f} s"
+        return f"{ms:.2f} ms"
 
     def angka(self, nomor, nama):
         teks = self.entri[nomor].get().strip()
@@ -227,6 +249,14 @@ class Aplikasi:
             return self.dequeue_naif()
         if kode == "queue_circular":
             return self.dequeue_circular()
+        if kode == "sort_insertion":
+            return self.urutkan("insertion")
+        if kode == "sort_merge":
+            return self.urutkan("merge")
+        if kode == "search_linear":
+            return self.cari("linear")
+        if kode == "search_binary":
+            return self.cari("binary")
         raise ValueError("menu belum dikenal: " + kode)
 
     def load(self):
@@ -241,6 +271,7 @@ class Aplikasi:
             self.link_m1.append(p)
         self.pengelola = PengelolaAntrean()
         self.pengelola.muat(self.data)
+        self.urut_oid = None
         self.nomor_baru = self.data.panjang + 1
         self.array_m1.jumlah_geser = 0  # reset pencacah
         self.array_m1.jumlah_salin = 0
@@ -389,6 +420,59 @@ class Aplikasi:
         teks += f"Tidak ada yang digeser. front {ribuan(q.front)}, rear {ribuan(q.rear)}, kapasitas {ribuan(q.kapasitas)}.\n"
         teks += f"Sisa antrean circular: {ribuan(q.panjang())}\n\n"
         return teks + self.tabel(keluar), "M2 - queue circular"
+
+    def urutkan(self, jenis):
+        n = self.angka(0, "Jumlah baris")
+        kunci = self.entri[1].get()
+        modul = "M3 - " + jenis + " sort"
+        if n < 1 or n > self.data.panjang:
+            raise ValueError("Jumlah baris harus 1 sampai " + ribuan(self.data.panjang))
+        if jenis == "insertion" and n > BATAS_INSERTION:
+            return "DITOLAK: batasnya 20.000 baris, pakai merge sort untuk data penuh", modul
+        data = ambil_awal(self.data, n)  # salinan, data asli aman
+        hitung = Pencacah()
+        if jenis == "insertion":
+            hasil = insertion_sort(data, kunci, hitung)
+        else:
+            hasil = merge_sort(data, kunci, hitung)
+        teks = f"{ribuan(n)} pesanan terurut | {ribuan(hitung.perbandingan)} perbandingan"
+        teks += f" | {ribuan(hitung.pemindahan)} pemindahan\n\n"
+        teks += f"{'#':>4}  {'oid':<10}{'pelanggan':<30}{'harga':>8}  {'selesai':<10}\n"
+        for i in range(min(hasil.panjang, 10)):
+            p = hasil.get(i)
+            teks += f"{i + 1:>4}  {p.oid:<10}{p.pelanggan:<30}{ribuan(p.harga):>8}  {format_waktu(p.t_selesai):<10}\n"
+        if hasil.panjang > 10:
+            teks += f"... dan {ribuan(hasil.panjang - 10)} baris lainnya\n"
+        return teks, modul
+
+    def cari(self, jenis):
+        target = self.entri[0].get().strip()
+        if target == "":
+            raise ValueError("oid tidak boleh kosong")
+        hitung = Pencacah()
+        teks = ""
+        if jenis == "linear":
+            modul = "M3 - linear"
+            daftar = self.data
+            i = linear_search(daftar, target, hitung)
+        else:
+            modul = "M3 - binary"
+            if self.urut_oid is None:
+                mulai = time.perf_counter()
+                bangun = Pencacah()
+                self.urut_oid = merge_sort(self.data, "oid", bangun)
+                ms = (time.perf_counter() - mulai) * 1000
+                teks += f"Daftar terurut oid dibangun sekali (merge sort): {self.waktu_teks(ms)}\n"
+            else:
+                teks += "Memakai daftar terurut oid yang sudah dibangun.\n"
+            daftar = self.urut_oid
+            i = binary_search(daftar, target, hitung)
+        if i == -1:
+            teks += f"{target} tidak ditemukan | {ribuan(hitung.perbandingan)} perbandingan"
+        else:
+            teks += f"ditemukan di indeks {ribuan(i)} | {ribuan(hitung.perbandingan)} perbandingan\n\n"
+            teks += self.detail(daftar.get(i))
+        return teks, modul
 
 
 def jalankan():
